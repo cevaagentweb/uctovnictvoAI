@@ -23,14 +23,42 @@ const ROLE_CONFIG = {
   user: { label: "User", sections: ["dashboard", "invoices", "assistant", "export"] }
 };
 
+const JSPDF_URL = "https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js";
+const TESSERACT_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
+const scriptCache = {};
+
 function uid(prefix = "id") { return `${prefix}_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`; }
 function today() { return new Date().toISOString().slice(0, 10); }
 function addDays(date, days) { const d = new Date(date); d.setDate(d.getDate() + days); return d.toISOString().slice(0, 10); }
 function esc(v = "") { return String(v ?? "").replace(/[&<>"]/g, (s) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" }[s])); }
 function money(n) { return EUR.format(Number(n || 0)); }
+function pdfMoney(n) { return `${Number(n || 0).toLocaleString("sk-SK", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} EUR`; }
 function num(n) { return Number(n || 0); }
 function fmtDate(s) { return s ? D.format(new Date(s)) : ""; }
 function csv(v) { const s = String(v ?? ""); return /[",\n;]/.test(s) ? `"${s.replace(/"/g, "\"\"")}"` : s; }
+function loadScript(src) {
+  if (scriptCache[src]) return scriptCache[src];
+  scriptCache[src] = new Promise((resolve, reject) => {
+    const existing = document.querySelector(`script[src="${src}"]`);
+    if (existing) { existing.addEventListener("load", resolve, { once: true }); existing.addEventListener("error", reject, { once: true }); return; }
+    const s = document.createElement("script");
+    s.src = src;
+    s.async = true;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error(`Nepodarilo sa nacitat ${src}`));
+    document.head.appendChild(s);
+  });
+  return scriptCache[src];
+}
+function amountFromText(v) {
+  const raw = String(v || "").replace(/\s/g, "").replace(/[^\d,.-]/g, "");
+  if (!raw) return 0;
+  const lastComma = raw.lastIndexOf(",");
+  const lastDot = raw.lastIndexOf(".");
+  const decimal = lastComma > lastDot ? "," : ".";
+  const normalized = raw.replace(decimal === "," ? /\./g : /,/g, "").replace(",", ".");
+  return Math.round((parseFloat(normalized) || 0) * 100) / 100;
+}
 
 function seed() {
   const p1 = { id: uid("profile"), type: "szco", businessName: "Milan Novak - konzultant", ico: "52123456", dic: "1087654321", icDph: "", address: "Hlavna 12, 900 31 Stupava", iban: "SK12 1100 0000 0029 1234 5678", registerText: "Zivnostensky register Okresneho uradu Bratislava", vatPayer: false, vatPeriod: "quarterly", accountingMode: "simple", taxRate: 0.15 };
@@ -174,18 +202,33 @@ function dashboard() {
 
 function invoiceForm(kind = "issued") { return `<form class="form" data-form="invoice"><div class="form-row"><label>Typ<select name="kind"><option value="issued" ${kind === "issued" ? "selected" : ""}>Vydana faktura</option><option value="received" ${kind === "received" ? "selected" : ""}>Prijata faktura</option></select></label><label>Klient / dodavatel<input name="counterpartyName" required placeholder="ABC Trade s.r.o."></label><label>Popis sluzby/tovaru<input name="desc" required placeholder="Konzultacne sluzby"></label><label>Suma bez DPH<input name="amount" type="number" step="0.01" required placeholder="2000"></label></div><div class="form-row"><label>DPH %<input name="vatRate" type="number" value="${profile().vatPayer ? 23 : 0}"></label><label>Splatnost dni<input name="dueDays" type="number" value="14"></label><label>Cislo faktury<input name="number" placeholder="nechat prazdne = automaticky"></label><label>&nbsp;<button class="btn primary" type="submit">Vytvorit fakturu</button></label></div></form>`; }
 function invoices() {
-  if (isUser()) return `<div class="grid">${readonlyBanner("User moze faktury prehliadat a exportovat, ale nema pravo ich menit.")}${panel("Faktury", "Read-only rezim pre bezneho pouzivatela.", invoiceTable(activeInvoices(), true))}</div>`;
+  if (isUser()) return `<div class="grid">${readonlyBanner("User moze faktury prehliadat a exportovat, ale nema pravo ich menit.")}${panel("Faktury", "Read-only rezim pre bezneho pouzivatela.", invoiceTable(activeInvoices(), "download"))}</div>`;
   return `<div class="grid">${panel("Nova faktura", "Vytvor fakturu rucne alebo cez AI chat.", invoiceForm())}${panel("Faktury", "Tlac/PDF, platby, export.", invoiceTable(activeInvoices()))}</div>`;
 }
-function invoiceTable(list, compact = false) { if (!list.length) return "<div class=\"empty\">Zatial tu nie su ziadne faktury.</div>"; return `<div class="table-wrap"><table><thead><tr><th>Cislo</th><th>Typ</th><th>Partner</th><th>Splatnost</th><th>Suma</th><th>Stav</th>${compact ? "" : "<th>Akcie</th>"}</tr></thead><tbody>${list.map((inv) => `<tr><td><strong>${esc(inv.invoiceNumber)}</strong><br><small>VS: ${esc(inv.variableSymbol)}</small></td><td>${inv.kind === "issued" ? "Vydana" : "Prijata"}</td><td>${esc(inv.counterpartyName)}<br><small>${esc(inv.items?.[0]?.description || "")}</small></td><td>${fmtDate(inv.dueDate)}</td><td><strong>${money(inv.total)}</strong><br><small>bez DPH ${money(inv.amountWithoutVat)}</small></td><td>${badge(currentStatus(inv))}</td>${compact ? "" : `<td><div class="actions"><button class="btn ghost" data-action="print-invoice" data-id="${inv.id}">PDF</button><button class="btn ghost" data-action="paid-invoice" data-id="${inv.id}">Zaplatene</button><button class="btn danger" data-action="delete-invoice" data-id="${inv.id}">Zmazat</button></div></td>`}</tr>`).join("")}</tbody></table></div>`; }
+function invoiceActions(inv, compact) {
+  if (compact === true) return "";
+  const common = `<button class="btn primary" data-action="download-invoice-pdf" data-id="${inv.id}">PDF</button><button class="btn ghost" data-action="print-invoice" data-id="${inv.id}">Tlac</button>`;
+  if (compact === "download") return `<td><div class="actions">${common}</div></td>`;
+  return `<td><div class="actions">${common}<button class="btn ghost" data-action="paid-invoice" data-id="${inv.id}">Zaplatene</button><button class="btn danger" data-action="delete-invoice" data-id="${inv.id}">Zmazat</button></div></td>`;
+}
+function invoiceTable(list, compact = false) { if (!list.length) return "<div class=\"empty\">Zatial tu nie su ziadne faktury.</div>"; const showActions = compact !== true; return `<div class="table-wrap"><table><thead><tr><th>Cislo</th><th>Typ</th><th>Partner</th><th>Splatnost</th><th>Suma</th><th>Stav</th>${showActions ? "<th>Akcie</th>" : ""}</tr></thead><tbody>${list.map((inv) => `<tr><td><strong>${esc(inv.invoiceNumber)}</strong><br><small>VS: ${esc(inv.variableSymbol)}</small></td><td>${inv.kind === "issued" ? "Vydana" : "Prijata"}</td><td>${esc(inv.counterpartyName)}<br><small>${esc(inv.items?.[0]?.description || "")}</small></td><td>${fmtDate(inv.dueDate)}</td><td><strong>${money(inv.total)}</strong><br><small>bez DPH ${money(inv.amountWithoutVat)}</small></td><td>${badge(currentStatus(inv))}</td>${invoiceActions(inv, compact)}</tr>`).join("")}</tbody></table></div>`; }
 
 function clients() { return isUser() ? accessDenied() : `<div class="grid">${panel("Novy klient", "Uloz si fakturacne udaje odberatela.", partyForm("client"))}${panel("Klienti", "Databaza odberatelov.", partyTable(state.clients, "client"))}</div>`; }
 function suppliers() { return isUser() ? accessDenied() : `<div class="grid">${panel("Novy dodavatel", "Uloz si dodavatelov a predvolene uctovanie.", partyForm("supplier"))}${panel("Dodavatelia", "Databaza dodavatelov.", partyTable(state.suppliers, "supplier"))}</div>`; }
 function partyForm(type) { const supplier = type === "supplier"; return `<form class="form" data-form="${type}"><div class="form-row"><label>Nazov<input name="name" required></label><label>ICO<input name="ico"></label><label>DIC<input name="dic"></label><label>IC DPH<input name="icDph"></label></div><div class="form-row"><label>Adresa<input name="address"></label><label>E-mail<input name="email"></label><label>${supplier ? "Kategoria" : "Predvolena sluzba"}<input name="extra"></label><label>&nbsp;<button class="btn primary" type="submit">Ulozit</button></label></div></form>`; }
 function partyTable(list, type) { if (!list.length) return "<div class=\"empty\">Ziadne zaznamy.</div>"; return `<div class="table-wrap"><table><thead><tr><th>Nazov</th><th>ICO / DIC</th><th>Kontakt</th><th>Extra</th><th>Akcie</th></tr></thead><tbody>${list.map((x) => `<tr><td><strong>${esc(x.name)}</strong><br><small>${esc(x.address || "")}</small></td><td>${esc(x.ico || "")}<br><small>${esc(x.dic || "")}</small></td><td>${esc(x.email || "")}<br><small>${esc(x.phone || "")}</small></td><td>${esc(x.defaultService || x.category || x.defaultAccount || "")}</td><td><button class="btn danger" data-action="delete-party" data-type="${type}" data-id="${x.id}">Zmazat</button></td></tr>`).join("")}</tbody></table></div>`; }
 
-function expenses() { return isUser() ? accessDenied() : `<div class="grid">${panel("Novy vydavok", "Blocek alebo nakladova polozka.", `<form class="form" data-form="expense"><div class="form-row"><label>Dodavatel<input name="supplierName" required></label><label>Kategoria<input name="category" value="Prevadzkove naklady"></label><label>Suma s DPH<input name="amountTotal" type="number" step="0.01" required></label><label>DPH %<input name="vatRate" type="number" value="23"></label></div><label>Poznamka<textarea name="note"></textarea></label><button class="btn primary" type="submit">Pridat vydavok</button></form>`)}${panel("Vydavky", "Evidovane vydavky a naklady.", expenseTable())}</div>`; }
-function expenseTable() { const list = activeExpenses(); if (!list.length) return "<div class=\"empty\">Ziadne vydavky.</div>"; return `<div class="table-wrap"><table><thead><tr><th>Datum</th><th>Dodavatel</th><th>Kategoria</th><th>Suma</th><th>DPH</th><th>Akcie</th></tr></thead><tbody>${list.map((e) => `<tr><td>${fmtDate(e.date)}</td><td>${esc(e.supplierName)}</td><td>${esc(e.category)}</td><td><strong>${money(e.amountTotal)}</strong><br><small>bez DPH ${money(e.amountWithoutVat)}</small></td><td>${money(e.vatAmount)}</td><td><button class="btn danger" data-action="delete-expense" data-id="${e.id}">Zmazat</button></td></tr>`).join("")}</tbody></table></div>`; }
+function receiptScanner() {
+  const d = state.receiptDraft || {};
+  const parsed = d.amountTotal ? `<div class="scan-result"><strong>Nacitane z blocku:</strong> ${esc(d.supplierName || "Dodavatel")} - ${money(d.amountTotal)} - ${esc(d.category || "Naklad")}</div>` : "";
+  return `<div class="scan-box"><label>Nahrat alebo odfotit blocek<input id="receiptUpload" type="file" accept="image/*" capture="environment"></label><div id="receiptStatus" class="scan-status">OCR funguje priamo v prehliadaci. Po nacitani skontroluj sumu a uloz vydavok.</div>${parsed}</div>`;
+}
+function expenseForm() {
+  const d = state.receiptDraft || {};
+  return `<form class="form" data-form="expense"><div class="form-row"><label>Datum<input name="date" type="date" value="${esc(d.date || today())}"></label><label>Dodavatel<input name="supplierName" required value="${esc(d.supplierName || "")}" placeholder="Hornbach / OBI / dodavatel"></label><label>Kategoria<input name="category" value="${esc(d.category || "Prevadzkove naklady")}"></label><label>Platba<select name="paymentMethod"><option value="cash" ${d.paymentMethod === "cash" ? "selected" : ""}>Hotovost</option><option value="card" ${d.paymentMethod === "card" ? "selected" : ""}>Karta</option><option value="bank" ${d.paymentMethod === "bank" ? "selected" : ""}>Bankovy prevod</option></select></label></div><div class="form-row"><label>Suma s DPH<input name="amountTotal" type="number" step="0.01" required value="${esc(d.amountTotal || "")}"></label><label>DPH %<input name="vatRate" type="number" value="${esc(d.vatRate ?? 23)}"></label><label>Cislo dokladu<input name="receiptNumber" value="${esc(d.receiptNumber || "")}"></label><label>Subor<input name="receiptFileName" value="${esc(d.fileName || "")}" readonly></label></div><label>Poznamka<textarea name="note">${esc(d.note || "")}</textarea></label><input type="hidden" name="receiptText" value="${esc(d.rawText || "")}"><button class="btn primary" type="submit">Pridat vydavok do nakladov</button></form>`;
+}
+function expenses() { return isUser() ? accessDenied() : `<div class="grid">${panel("Scan blocku", "Odfot alebo nahraj pokladnicny doklad.", receiptScanner())}${panel("Novy vydavok", "Blocek, hotovostny nakup alebo nakladova polozka.", expenseForm())}${panel("Vydavky", "Evidovane vydavky a naklady.", expenseTable())}</div>`; }
+function expenseTable() { const list = activeExpenses(); if (!list.length) return "<div class=\"empty\">Ziadne vydavky.</div>"; return `<div class="table-wrap"><table><thead><tr><th>Datum</th><th>Dodavatel</th><th>Kategoria</th><th>Suma</th><th>DPH</th><th>Platba</th><th>Akcie</th></tr></thead><tbody>${list.map((e) => `<tr><td>${fmtDate(e.date)}</td><td>${esc(e.supplierName)}<br><small>${esc(e.receiptNumber || e.receiptFileName || "")}</small></td><td>${esc(e.category)}</td><td><strong>${money(e.amountTotal)}</strong><br><small>bez DPH ${money(e.amountWithoutVat)}</small></td><td>${money(e.vatAmount)}</td><td>${esc(e.paymentMethod || "cash")}</td><td><button class="btn danger" data-action="delete-expense" data-id="${e.id}">Zmazat</button></td></tr>`).join("")}</tbody></table></div>`; }
 
 function bank() { return isUser() ? accessDenied() : `<div class="grid">${panel("Novy bankovy pohyb", "Pridaj pohyb alebo ho importuj neskor z CSV.", `<form class="form" data-form="bank"><div class="form-row"><label>Datum<input name="date" type="date" value="${today()}"></label><label>Suma<input name="amount" type="number" step="0.01" required></label><label>Protiucet / partner<input name="counterparty"></label><label>VS<input name="variableSymbol"></label></div><label>Poznamka<textarea name="note"></textarea></label><button class="btn primary" type="submit">Pridat a skusit sparovat</button></form>`)}${panel("Bankove pohyby", "Automaticke parovanie podla VS a sumy.", bankTable(), `<button class="btn ghost" data-action="auto-pair">Automaticky parovat</button>`)}</div>`; }
 function bankTable() { const list = activeBank(); if (!list.length) return "<div class=\"empty\">Ziadne bankove pohyby.</div>"; return `<div class="table-wrap"><table><thead><tr><th>Datum</th><th>Partner</th><th>VS</th><th>Suma</th><th>Stav</th><th>Poznamka</th></tr></thead><tbody>${list.map((b) => `<tr><td>${fmtDate(b.date)}</td><td>${esc(b.counterparty)}</td><td>${esc(b.variableSymbol)}</td><td><strong>${money(b.amount)}</strong></td><td>${badge(b.status)}</td><td>${esc(b.note || "")}</td></tr>`).join("")}</tbody></table></div>`; }
@@ -199,6 +242,40 @@ function assistant() { return `<div class="grid grid-2"><section class="panel"><
 function settings() { if (isUser()) return accessDenied(); const p = profile(); return panel("Profil subjektu", "Udaje pouzivane na fakturach a vypoctoch.", `<form class="form" data-form="profile"><div class="form-row"><label>Typ<select name="type"><option value="szco" ${p.type === "szco" ? "selected" : ""}>SZCO</option><option value="sro" ${p.type === "sro" ? "selected" : ""}>s.r.o.</option></select></label><label>Nazov<input name="businessName" value="${esc(p.businessName)}"></label><label>ICO<input name="ico" value="${esc(p.ico)}"></label><label>DIC<input name="dic" value="${esc(p.dic)}"></label></div><div class="form-row"><label>IC DPH<input name="icDph" value="${esc(p.icDph)}"></label><label>IBAN<input name="iban" value="${esc(p.iban)}"></label><label>DPH<select name="vatPayer"><option value="true" ${p.vatPayer ? "selected" : ""}>Platitel</option><option value="false" ${!p.vatPayer ? "selected" : ""}>Neplatitel</option></select></label><label>Sadzba dane<input name="taxRate" type="number" step="0.01" value="${p.taxRate}"></label></div><label>Adresa<input name="address" value="${esc(p.address)}"></label><label>Register<input name="registerText" value="${esc(p.registerText)}"></label><button class="btn primary" type="submit">Ulozit nastavenia</button></form>`); }
 function exportPage() { return `<div class="grid grid-2">${panel("Exporty", "Stiahni si data z aplikacie.", `<div class="actions"><button class="btn primary" data-action="export-json">Export celej firmy JSON</button><button class="btn ghost" data-action="export-invoices">Faktury CSV</button><button class="btn ghost" data-action="export-journal">Uctovny dennik CSV</button></div>`)}${panel("Render hosting", "Aktualna verzia je static app.", `<ul><li>Build Command: <code>echo "Static app - no build required"</code></li><li>Publish Directory: <code>public</code></li><li>Blueprint: <code>render.yaml</code></li></ul><div class="notice">Pre produkcny SaaS treba databazu, login a serverove API.</div>`)}</div>`; }
 
+function parseReceiptText(text = "", fileName = "") {
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const supplier = lines.find((l) => /[a-zA-Z]/.test(l) && !/\b(doklad|block|receipt|faktura|datum|total|celkom|suma|dph)\b/i.test(l)) || "Dodavatel z blocku";
+  const dateMatch = text.match(/(\d{1,2})[.\-/](\d{1,2})[.\-/](20\d{2}|\d{2})/);
+  const date = dateMatch ? `${String(dateMatch[3]).length === 2 ? `20${dateMatch[3]}` : dateMatch[3]}-${String(dateMatch[2]).padStart(2, "0")}-${String(dateMatch[1]).padStart(2, "0")}` : today();
+  const keywordAmounts = [...text.matchAll(/(?:celkom|spolu|total|suma|hotovost|karta|cash)[^\d]{0,24}(\d[\d\s]*(?:[,.]\d{2}))/gi)].map((m) => amountFromText(m[1])).filter(Boolean);
+  const allAmounts = [...text.matchAll(/(\d[\d\s]*(?:[,.]\d{2}))/g)].map((m) => amountFromText(m[1])).filter((n) => n > 0 && n < 100000);
+  const amountTotal = keywordAmounts.at(-1) || Math.max(0, ...allAmounts);
+  const vatRate = /\b23\s*%/.test(text) ? 23 : /\b20\s*%/.test(text) ? 20 : /\b10\s*%/.test(text) ? 10 : 23;
+  const receiptNumber = (text.match(/(?:doklad|block|uctenka|receipt|cislo)[^\w\d]{0,8}([A-Z0-9/-]{4,})/i) || [])[1] || "";
+  const category = /naradie|vrtak|skrutk|kladiv|pila|brus|tool|hornbach|obi|bauhaus|merkur/i.test(text) ? "Naradie" : "Prevadzkove naklady";
+  return { supplierName: supplier.slice(0, 80), date, amountTotal, vatRate, receiptNumber, category, paymentMethod: /hotovost|cash/i.test(text) ? "cash" : /karta|card|visa|mastercard/i.test(text) ? "card" : "cash", note: fileName ? `Nacitane z blocku: ${fileName}` : "Nacitane z blocku", rawText: text, fileName };
+}
+async function scanReceiptFile(file) {
+  if (!file || !requireAdmin()) return;
+  const status = document.getElementById("receiptStatus");
+  if (status) status.textContent = "Nacitavam OCR modul...";
+  try {
+    await loadScript(TESSERACT_URL);
+    if (!window.Tesseract) throw new Error("OCR modul nie je dostupny.");
+    if (status) status.textContent = "Citam text z blocku. Pri prvej fotke to moze trvat dlhsie.";
+    const result = await window.Tesseract.recognize(file, "slk+eng", {
+      logger: (m) => { if (status && m.status) status.textContent = `${m.status}${m.progress ? ` ${Math.round(m.progress * 100)}%` : ""}`; }
+    });
+    const rawText = result?.data?.text || "";
+    state.receiptDraft = parseReceiptText(rawText, file.name);
+    save();
+    render();
+  } catch (err) {
+    if (status) status.textContent = `OCR sa nepodarilo spustit: ${err.message}`;
+    alert(`Nepodarilo sa precitat blocek automaticky. Stale ho vies zadat rucne. Detail: ${err.message}`);
+  }
+}
+
 function submitForm(form) {
   const data = Object.fromEntries(new FormData(form).entries());
   const type = form.dataset.form;
@@ -207,7 +284,7 @@ function submitForm(form) {
   if (type === "invoice") { const inv = makeInvoice({ profileId: p.id, kind: data.kind, counterpartyName: data.counterpartyName, desc: data.desc, amount: data.amount, vatRate: data.vatRate, dueDays: num(data.dueDays) || 14, number: data.number || undefined }); state.invoices.unshift(inv); addJournalForInvoice(inv); save(); render(); return; }
   if (type === "client") { state.clients.unshift({ id: uid("client"), name: data.name, ico: data.ico, dic: data.dic, icDph: data.icDph, address: data.address, email: data.email, phone: "", defaultDueDays: 14, defaultService: data.extra }); save(); render(); return; }
   if (type === "supplier") { state.suppliers.unshift({ id: uid("supplier"), name: data.name, ico: data.ico, dic: data.dic, icDph: data.icDph, address: data.address, email: data.email, category: data.extra, defaultAccount: "" }); save(); render(); return; }
-  if (type === "expense") { const total = num(data.amountTotal); const rate = num(data.vatRate); const base = rate ? total / (1 + rate / 100) : total; const vat = total - base; state.expenses.unshift({ id: uid("expense"), profileId: p.id, supplierName: data.supplierName, date: today(), category: data.category, amountWithoutVat: Math.round(base * 100) / 100, vatRate: rate, vatAmount: Math.round(vat * 100) / 100, amountTotal: total, note: data.note }); save(); render(); return; }
+  if (type === "expense") { const total = num(data.amountTotal); const rate = num(data.vatRate); const base = rate ? total / (1 + rate / 100) : total; const vat = total - base; state.expenses.unshift({ id: uid("expense"), profileId: p.id, supplierName: data.supplierName, date: data.date || today(), category: data.category, amountWithoutVat: Math.round(base * 100) / 100, vatRate: rate, vatAmount: Math.round(vat * 100) / 100, amountTotal: total, paymentMethod: data.paymentMethod || "cash", receiptNumber: data.receiptNumber, receiptFileName: data.receiptFileName, receiptText: data.receiptText, note: data.note }); state.receiptDraft = null; save(); render(); return; }
   if (type === "bank") { const b = { id: uid("bank"), profileId: p.id, date: data.date || today(), amount: num(data.amount), counterparty: data.counterparty, variableSymbol: data.variableSymbol, note: data.note, matchedInvoiceId: "", status: "unmatched" }; tryPair(b); state.bank.unshift(b); save(); render(); return; }
   if (type === "template") { state.templates.unshift({ id: uid("tpl"), profileId: p.id, name: data.name, clientName: data.clientName, description: data.description, amount: num(data.amount), vatRate: num(data.vatRate), dueDays: num(data.dueDays) || 14 }); save(); render(); return; }
   if (type === "profile") { Object.assign(p, { type: data.type, businessName: data.businessName, ico: data.ico, dic: data.dic, icDph: data.icDph, iban: data.iban, vatPayer: data.vatPayer === "true", taxRate: num(data.taxRate), address: data.address, registerText: data.registerText, accountingMode: data.type === "sro" ? "double" : "simple" }); save(); render(); return; }
@@ -251,6 +328,82 @@ function handleChat(text = "") {
   }, 0);
 }
 function download(filename, content, type = "text/plain") { const blob = new Blob([content], { type }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = filename; a.click(); URL.revokeObjectURL(a.href); }
+async function downloadInvoicePdf(id) {
+  const inv = state.invoices.find((i) => i.id === id);
+  if (!inv) return;
+  try {
+    await loadScript(JSPDF_URL);
+    const JsPDF = window.jspdf?.jsPDF;
+    if (!JsPDF) throw new Error("PDF kniznica nie je dostupna.");
+    const p = state.profiles.find((x) => x.id === inv.profileId) || profile();
+    const cp = [...state.clients, ...state.suppliers].find((x) => x.id === inv.counterpartyId || x.name === inv.counterpartyName) || {};
+    const doc = new JsPDF({ unit: "pt", format: "a4" });
+    const left = 42;
+    const right = 553;
+    let y = 52;
+    const write = (text, x, yy, options = {}) => doc.text(String(text || ""), x, yy, options);
+    const wrapped = (text, x, yy, width, lineHeight = 13) => {
+      const lines = doc.splitTextToSize(String(text || ""), width);
+      doc.text(lines, x, yy);
+      return yy + lines.length * lineHeight;
+    };
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(26);
+    write(`Faktura ${inv.invoiceNumber}`, left, y);
+    doc.setFontSize(10);
+    doc.setFont("helvetica", "normal");
+    write(`Variabilny symbol: ${inv.variableSymbol}`, left, y + 20);
+    write(`Vystavene: ${fmtDate(inv.issueDate)}`, right, y, { align: "right" });
+    write(`Splatnost: ${fmtDate(inv.dueDate)}`, right, y + 15, { align: "right" });
+    y += 60;
+
+    doc.setDrawColor(226, 232, 240);
+    doc.roundedRect(left, y, 240, 112, 8, 8);
+    doc.roundedRect(313, y, 240, 112, 8, 8);
+    doc.setFont("helvetica", "bold");
+    write("Dodavatel", left + 14, y + 20);
+    write("Odberatel", 327, y + 20);
+    doc.setFont("helvetica", "normal");
+    wrapped(`${p.businessName}\n${p.address}\nICO: ${p.ico}\nDIC: ${p.dic}${p.icDph ? `\nIC DPH: ${p.icDph}` : ""}\nIBAN: ${p.iban}`, left + 14, y + 40, 210, 12);
+    wrapped(`${cp.name || inv.counterpartyName}\n${cp.address || ""}${cp.ico ? `\nICO: ${cp.ico}` : ""}${cp.dic ? `\nDIC: ${cp.dic}` : ""}${cp.icDph ? `\nIC DPH: ${cp.icDph}` : ""}`, 327, y + 40, 210, 12);
+    y += 150;
+
+    doc.setFont("helvetica", "bold");
+    doc.setFillColor(248, 250, 252);
+    doc.rect(left, y, 511, 28, "F");
+    write("Polozka", left + 10, y + 18);
+    write("Bez DPH", 370, y + 18, { align: "right" });
+    write("DPH", 448, y + 18, { align: "right" });
+    write("Spolu", 535, y + 18, { align: "right" });
+    y += 42;
+    doc.setFont("helvetica", "normal");
+    inv.items.forEach((it) => {
+      const nextY = wrapped(`${it.description} (${it.quantity} ${it.unit})`, left + 10, y, 250, 13);
+      write(pdfMoney(it.amountWithoutVat), 370, y, { align: "right" });
+      write(pdfMoney(it.vatAmount), 448, y, { align: "right" });
+      write(pdfMoney(it.total), 535, y, { align: "right" });
+      y = Math.max(nextY, y + 22);
+    });
+    y += 18;
+    doc.line(left, y, right, y);
+    y += 24;
+    write(`Zaklad dane: ${pdfMoney(inv.amountWithoutVat)}`, right, y, { align: "right" });
+    y += 16;
+    write(`DPH: ${pdfMoney(inv.vatAmount)}`, right, y, { align: "right" });
+    y += 24;
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(16);
+    write(`Celkom na uhradu: ${pdfMoney(inv.total)}`, right, y, { align: "right" });
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9);
+    wrapped("Vygenerovane aplikaciou UctoBot. MVP dokument bez certifikacie uctovneho softveru.", left, 780, 511, 11);
+    doc.save(`faktura-${inv.invoiceNumber}.pdf`);
+    inv.pdfDownloadedAt = new Date().toISOString();
+    save();
+  } catch (err) {
+    alert(`PDF sa nepodarilo vytvorit automaticky. Skus tlacidlo Tlac a uloz ako PDF. Detail: ${err.message}`);
+  }
+}
 function printInvoice(id) {
   const inv = state.invoices.find((i) => i.id === id);
   if (!inv) return;
@@ -274,6 +427,7 @@ document.addEventListener("click", (e) => {
   if (action === "login-user") { state.sessionRole = "user"; save(); render(); return; }
   if (action === "logout") { state.sessionRole = ""; save(); render(); return; }
   if (action === "reset-demo") { if (confirm("Naozaj resetovat demo data?")) { const currentRole = role(); state = seed(); state.sessionRole = currentRole; save(); render(); } return; }
+  if (action === "download-invoice-pdf") { downloadInvoicePdf(id); return; }
   if (action === "print-invoice") printInvoice(id);
   if (action === "paid-invoice") { if (!requireAdmin()) return; const inv = state.invoices.find((i) => i.id === id); if (inv) inv.status = "paid"; save(); render(); }
   if (action === "delete-invoice") { if (!requireAdmin()) return; state.invoices = state.invoices.filter((i) => i.id !== id); save(); render(); }
@@ -290,6 +444,7 @@ document.addEventListener("submit", (e) => { e.preventDefault(); submitForm(e.ta
 document.addEventListener("change", (e) => {
   if (e.target.id === "profileSelect") { state.activeProfileId = e.target.value; save(); render(); }
   if (e.target.id === "roleSelect") { state.sessionRole = e.target.value; save(); render(); }
+  if (e.target.id === "receiptUpload") scanReceiptFile(e.target.files?.[0]);
 });
 
 render();

@@ -79,6 +79,10 @@ tr:last-child td { border-bottom: 0; }
 .badge.bad { color: #b91c1c; background: #fef2f2; border-color: #fecaca; }
 .badge.info { color: #1d4ed8; background: #eff6ff; border-color: #bfdbfe; }
 .notice { border: 1px solid #fde68a; background: #fffbeb; color: #92400e; border-radius: 18px; padding: 14px 16px; font-size: 14px; }
+.scan-box { display: grid; gap: 12px; }
+.scan-box input[type="file"] { border-style: dashed; background: #f8fafc; }
+.scan-status { border: 1px solid var(--line); background: #f8fafc; color: var(--muted); border-radius: 16px; padding: 12px 14px; font-size: 13px; }
+.scan-result { border: 1px solid #a7f3d0; background: #ecfdf5; color: #065f46; border-radius: 16px; padding: 12px 14px; font-size: 14px; }
 .empty { padding: 34px; text-align: center; color: var(--muted); border: 1px dashed #cbd5e1; border-radius: 18px; background: #f8fafc; }
 .chat-box { height: 360px; overflow: auto; background: #f8fafc; border: 1px solid var(--line); border-radius: 18px; padding: 14px; display: grid; gap: 10px; align-content: start; }
 .msg { max-width: 82%; padding: 11px 13px; border-radius: 16px; font-size: 14px; line-height: 1.45; white-space: pre-wrap; }

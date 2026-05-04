@@ -9,6 +9,12 @@ Static MVP accounting dashboard prepared for GitHub and Render.
 
 The role chooser is frontend-only and stored in browser `localStorage`. It is useful for demos on Render, but it is not real authentication.
 
+## Current functional flows
+
+- Create an issued invoice in `Faktury`, then download it as PDF or open the print/PDF view.
+- Add expenses manually in `Vydavky`, including cash purchases.
+- Upload or photograph a receipt in `Vydavky`; OCR tries to prefill supplier, date, amount, VAT rate, category, and payment method.
+
 ## Structure
 
 - `public/index.html` - app entrypoint

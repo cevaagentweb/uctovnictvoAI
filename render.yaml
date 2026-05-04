@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: uctobot-static
+    runtime: static
+    buildCommand: echo "Static app - no build required"
+    staticPublishPath: public
+    pullRequestPreviewsEnabled: false
+    headers:
+      - path: /*
+        name: Cache-Control
+        value: no-cache

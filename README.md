@@ -23,12 +23,13 @@ You can open `public/index.html` directly in a browser, or serve the folder with
 ## Deploy on Render
 
 1. Push this repository to GitHub.
-2. In Render, create a new Blueprint or Static Site.
+2. In Render, create a new Blueprint, Static Site, or Docker Web Service.
 3. Select the GitHub repository.
 4. If using the blueprint, Render will read `render.yaml` automatically.
 5. If creating the site manually, use:
    - Build Command: `echo "Static app - no build required"`
    - Publish Directory: `public`
+6. If the Render service is already configured as Docker, Render will use the included `Dockerfile`.
 
 ## Notes
 
